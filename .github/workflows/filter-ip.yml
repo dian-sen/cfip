@@ -22,14 +22,28 @@ jobs:
           import os
           from collections import defaultdict
 
+          # 源IP位置 里出现的简称 → 输出标签
           REGION_MAP = {
-              "HK": ["HK", "HKG", "Hong Kong", "香港"],
-              "TW": ["TW", "TPE", "Taipei", "Taiwan", "台湾"],
-              "JP": ["JP", "NRT", "KIX", "HND", "Tokyo", "Osaka", "Japan", "日本"],
-              "US": ["US", "LAX", "SJC", "SEA", "IAD", "DFW", "ORD", "ATL", "EWR", "United States", "美国"],
-              "KR": ["KR", "ICN", "Seoul", "Korea", "韩国"],
-              "SG": ["SG", "SIN", "Singapore", "新加坡"],
-              "DE": ["DE", "FRA", "Germany", "德国"],
+              "HK": "HK",
+              "TW": "TW",
+              "JP": "JP",
+              "US": "US",
+              "KR": "KR",
+              "SG": "SG",
+              "DE": "DE",
+              # 兼容可能出现的机房码
+              "HKG": "HK",
+              "TPE": "TW",
+              "NRT": "JP",
+              "KIX": "JP",
+              "HND": "JP",
+              "ICN": "KR",
+              "SIN": "SG",
+              "FRA": "DE",
+              "LAX": "US",
+              "SJC": "US",
+              "SEA": "US",
+              "IAD": "US",
           }
 
           PER_REGION = 10
@@ -44,30 +58,16 @@ jobs:
                   f.write("")
               raise SystemExit(1)
 
-          def match_region(row):
-              text = " ".join(str(v) for v in row.values()).upper()
-              for code, keys in REGION_MAP.items():
-                  for k in keys:
-                      if k.upper() in text:
-                          return code
-              return None
-
           def latency_key(r):
-              for key in ("平均延迟", "延迟", "latency", "avg_latency", "Latency", "AvgLatency"):
-                  if key in r and r[key] not in (None, ""):
-                      try:
-                          return float(str(r[key]).replace("ms", "").strip())
-                      except:
-                          pass
-              return 99999
+              val = str(r.get("网络延迟", "")).replace("ms", "").strip()
+              try:
+                  return float(val)
+              except:
+                  return 99999
 
-          def extract_ip_port(r):
-              for key in ("IP 地址", "IP地址", "IP", "ip", "地址", "Endpoint", "endpoint"):
-                  if key in r and r[key]:
-                      val = str(r[key]).strip()
-                      if val:
-                          return val
-              return None
+          def get_region(r):
+              loc = str(r.get("源IP位置", "")).strip().upper()
+              return REGION_MAP.get(loc)
 
           buckets = defaultdict(list)
 
@@ -82,16 +82,17 @@ jobs:
           rows.sort(key=latency_key)
 
           for r in rows:
-              region = match_region(r)
+              region = get_region(r)
               if not region:
                   continue
               if len(buckets[region]) >= PER_REGION:
                   continue
 
-              ip_port = extract_ip_port(r)
+              ip_port = str(r.get("IP:PORT", "")).strip()
               if not ip_port:
                   continue
 
+              # 已包含端口，直接使用
               line = f"{ip_port}#{region}"
               buckets[region].append(line)
 
