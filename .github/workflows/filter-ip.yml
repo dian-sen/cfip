@@ -6,6 +6,9 @@ on:
       - 'raw/results.csv'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   filter:
     runs-on: ubuntu-latest
@@ -19,7 +22,6 @@ jobs:
           import os
           from collections import defaultdict
 
-          # 地区关键词（含简称 + 机房码 + 中英文）
           REGION_MAP = {
               "HK": ["HK", "HKG", "Hong Kong", "香港"],
               "TW": ["TW", "TPE", "Taipei", "Taiwan", "台湾"],
@@ -33,6 +35,14 @@ jobs:
           PER_REGION = 10
           INPUT = "raw/results.csv"
           OUTPUT = "api/preferred.txt"
+
+          os.makedirs("api", exist_ok=True)
+
+          if not os.path.exists(INPUT):
+              print(f"ERROR: {INPUT} not found.")
+              with open(OUTPUT, "w", encoding="utf-8") as f:
+                  f.write("")
+              raise SystemExit(1)
 
           def match_region(row):
               text = " ".join(str(v) for v in row.values()).upper()
@@ -52,7 +62,6 @@ jobs:
               return 99999
 
           def extract_ip_port(r):
-              # 优先找已经带端口的完整地址
               for key in ("IP 地址", "IP地址", "IP", "ip", "地址", "Endpoint", "endpoint"):
                   if key in r and r[key]:
                       val = str(r[key]).strip()
@@ -65,6 +74,10 @@ jobs:
           with open(INPUT, newline="", encoding="utf-8-sig") as f:
               reader = csv.DictReader(f)
               rows = list(reader)
+
+          print(f"CSV rows: {len(rows)}")
+          if rows:
+              print(f"CSV headers: {list(rows[0].keys())}")
 
           rows.sort(key=latency_key)
 
@@ -79,7 +92,6 @@ jobs:
               if not ip_port:
                   continue
 
-              # 已包含端口，直接使用，不做端口修改
               line = f"{ip_port}#{region}"
               buckets[region].append(line)
 
@@ -88,7 +100,6 @@ jobs:
           for code in order:
               lines.extend(buckets.get(code, []))
 
-          os.makedirs("api", exist_ok=True)
           with open(OUTPUT, "w", encoding="utf-8") as f:
               f.write("\n".join(lines) + ("\n" if lines else ""))
 
