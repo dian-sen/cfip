@@ -38,6 +38,12 @@ jobs:
           OUTPUT = "api/preferred.txt"
           EXPECTED_HEADERS = ["IP:PORT", "源IP位置", "网络延迟"]
 
+          # 单行格式: 1.2.3.4:443#HK-67ms
+          LINE_RE = re.compile(
+              r"^(?P<ip>\d{1,3}(?:\.\d{1,3}){3}:\d+)#(?P<region>[A-Za-z]{2,4})(?:-(?P<latency>\d+(?:\.\d+)?)ms?)?$"
+          )
+          IP_ONLY_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}:\d+$")
+
           os.makedirs("api", exist_ok=True)
 
           if not os.path.exists(INPUT):
@@ -46,68 +52,117 @@ jobs:
                   f.write("")
               raise SystemExit(1)
 
-          def is_ip_port(s: str) -> bool:
-              s = str(s).strip()
-              return bool(re.match(r"^\d{1,3}(?:\.\d{1,3}){3}:\d+$", s))
+          with open(INPUT, encoding="utf-8-sig") as f:
+              raw_lines = [ln.strip() for ln in f if ln.strip()]
 
-          def latency_key(r):
-              val = str(r.get("网络延迟", "")).replace("ms", "").strip()
-              try:
-                  return float(val)
-              except Exception:
-                  return 99999
-
-          def get_region(r):
-              loc = str(r.get("源IP位置", "")).strip().upper()
-              return REGION_MAP.get(loc)
-
-          with open(INPUT, newline="", encoding="utf-8-sig") as f:
-              sample = f.read()
-
-          lines = [ln for ln in sample.splitlines() if ln.strip()]
-          if not lines:
-              print("CSV is empty")
+          if not raw_lines:
+              print("File is empty")
               with open(OUTPUT, "w", encoding="utf-8") as f:
                   f.write("")
               raise SystemExit(0)
 
-          first_row = next(csv.reader([lines[0]]))
-          has_header = True
-          if first_row and is_ip_port(first_row[0]):
-              has_header = False
-              print("No header detected, using default headers:", EXPECTED_HEADERS)
+          def normalize_region(code: str):
+              return REGION_MAP.get(str(code).strip().upper())
+
+          records = []  # list of dict: ip_port, region, latency
+
+          # ---------- 优先尝试「单行 IP:PORT#REGION-延迟」格式 ----------
+          line_hits = 0
+          for ln in raw_lines[:20]:  # 抽样前 20 行判断
+              if LINE_RE.match(ln.split(",")[0].strip()):
+                  line_hits += 1
+
+          if line_hits >= max(3, len(raw_lines[:20]) // 2):
+              print("Detected format: IP:PORT#REGION-latency")
+              for ln in raw_lines:
+                  # 有的行可能被写成 CSV 多列，只取第一列
+                  first = ln.split(",")[0].strip()
+                  m = LINE_RE.match(first)
+                  if not m:
+                      continue
+                  region = normalize_region(m.group("region"))
+                  if not region:
+                      continue
+                  latency = 99999.0
+                  if m.group("latency"):
+                      try:
+                          latency = float(m.group("latency"))
+                      except Exception:
+                          pass
+                  records.append({
+                      "ip_port": m.group("ip"),
+                      "region": region,
+                      "latency": latency,
+                  })
           else:
-              print("Header detected:", first_row)
+              # ---------- 回退：按 CSV 三列处理 ----------
+              sample = "\n".join(raw_lines)
+              first_row = next(csv.reader([raw_lines[0]]))
+              has_header = True
+              if first_row and IP_ONLY_RE.match(first_row[0].strip()):
+                  has_header = False
+                  print("Detected format: CSV without header")
+              else:
+                  # 若第一列不像表头关键字，且整体像数据，也当无表头
+                  header_like = any(k in raw_lines[0] for k in ("IP", "PORT", "延迟", "位置", "latency"))
+                  if not header_like and len(first_row) >= 2:
+                      has_header = False
+                      print("Detected format: CSV without header (heuristic)")
+                  else:
+                      print("Detected format: CSV with header:", first_row)
 
-          if has_header:
-              reader = csv.DictReader(StringIO(sample))
-          else:
-              reader = csv.DictReader(StringIO(sample), fieldnames=EXPECTED_HEADERS)
+              if has_header:
+                  reader = csv.DictReader(StringIO(sample))
+              else:
+                  reader = csv.DictReader(StringIO(sample), fieldnames=EXPECTED_HEADERS)
 
-          rows = list(reader)
+              for r in reader:
+                  ip_port = str(r.get("IP:PORT", "")).strip()
+                  if not ip_port:
+                      continue
+                  # 兼容单元格里直接是 IP:PORT#HK-67ms
+                  m = LINE_RE.match(ip_port)
+                  if m:
+                      region = normalize_region(m.group("region"))
+                      latency = 99999.0
+                      if m.group("latency"):
+                          try:
+                              latency = float(m.group("latency"))
+                          except Exception:
+                              pass
+                      ip_port = m.group("ip")
+                  else:
+                      if not IP_ONLY_RE.match(ip_port):
+                          continue
+                      region = normalize_region(r.get("源IP位置", ""))
+                      latency = 99999.0
+                      val = str(r.get("网络延迟", "")).replace("ms", "").strip()
+                      try:
+                          latency = float(val)
+                      except Exception:
+                          pass
 
-          print(f"CSV rows: {len(rows)}")
-          if rows:
-              print(f"CSV headers used: {list(rows[0].keys())}")
-              print(f"Sample row: {dict(rows[0])}")
+                  if not region:
+                      continue
+                  records.append({
+                      "ip_port": ip_port,
+                      "region": region,
+                      "latency": latency,
+                  })
 
+          print(f"Parsed records: {len(records)}")
+          if records:
+              print(f"Sample: {records[0]}")
+
+          # ---------- 按地区取延迟最低的 N 个 ----------
+          records.sort(key=lambda x: x["latency"])
           buckets = defaultdict(list)
-          rows.sort(key=latency_key)
 
-          for r in rows:
-              region = get_region(r)
-              if not region:
-                  continue
+          for r in records:
+              region = r["region"]
               if len(buckets[region]) >= PER_REGION:
                   continue
-
-              ip_port = str(r.get("IP:PORT", "")).strip()
-              if not ip_port or not is_ip_port(ip_port):
-                  continue
-
-              # 已包含端口，直接使用，不做端口修改
-              line = f"{ip_port}#{region}"
-              buckets[region].append(line)
+              buckets[region].append(f"{r['ip_port']}#{region}")
 
           lines_out = []
           order = ["HK", "TW", "JP", "US", "KR", "SG", "DE"]
