@@ -1,10 +1,28 @@
-- name: Filter by region
+name: Filter Preferred IPs by Region
+
+on:
+  push:
+    paths:
+      - 'raw/results.csv'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  filter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Filter by region
         run: |
           python3 << 'EOF'
           import csv
           import os
           import re
           from collections import defaultdict
+          from io import StringIO
 
           REGION_MAP = {
               "HK": "HK", "TW": "TW", "JP": "JP", "US": "US",
@@ -12,6 +30,7 @@
               "HKG": "HK", "TPE": "TW", "NRT": "JP", "KIX": "JP", "HND": "JP",
               "ICN": "KR", "SIN": "SG", "FRA": "DE",
               "LAX": "US", "SJC": "US", "SEA": "US", "IAD": "US",
+              "DFW": "US", "ORD": "US", "ATL": "US", "EWR": "US",
           }
 
           PER_REGION = 10
@@ -28,26 +47,23 @@
               raise SystemExit(1)
 
           def is_ip_port(s: str) -> bool:
-              s = s.strip()
-              # 简单判断：形如 1.2.3.4:443 或带端口的地址
+              s = str(s).strip()
               return bool(re.match(r"^\d{1,3}(?:\.\d{1,3}){3}:\d+$", s))
 
           def latency_key(r):
               val = str(r.get("网络延迟", "")).replace("ms", "").strip()
               try:
                   return float(val)
-              except:
+              except Exception:
                   return 99999
 
           def get_region(r):
               loc = str(r.get("源IP位置", "")).strip().upper()
               return REGION_MAP.get(loc)
 
-          # 先读原始行，判断有没有表头
           with open(INPUT, newline="", encoding="utf-8-sig") as f:
               sample = f.read()
 
-          # 统一换行后按行处理
           lines = [ln for ln in sample.splitlines() if ln.strip()]
           if not lines:
               print("CSV is empty")
@@ -63,21 +79,17 @@
           else:
               print("Header detected:", first_row)
 
-          # 用 DictReader 读取；无表头时手动指定 fieldnames
-          from io import StringIO
           if has_header:
               reader = csv.DictReader(StringIO(sample))
           else:
               reader = csv.DictReader(StringIO(sample), fieldnames=EXPECTED_HEADERS)
 
           rows = list(reader)
-          # 无表头时第一行就是数据，不用再跳过
-          # 有表头时 DictReader 已自动跳过表头
 
           print(f"CSV rows: {len(rows)}")
           if rows:
               print(f"CSV headers used: {list(rows[0].keys())}")
-              print(f"Sample row: {rows[0]}")
+              print(f"Sample row: {dict(rows[0])}")
 
           buckets = defaultdict(list)
           rows.sort(key=latency_key)
@@ -93,6 +105,7 @@
               if not ip_port or not is_ip_port(ip_port):
                   continue
 
+              # 已包含端口，直接使用，不做端口修改
               line = f"{ip_port}#{region}"
               buckets[region].append(line)
 
@@ -109,3 +122,11 @@
               print(f"{code}: {len(buckets.get(code, []))}")
           print(f"Total: {len(lines_out)}")
           EOF
+
+      - name: Commit filtered result
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add api/preferred.txt
+          git diff --staged --quiet || git commit -m "auto: filter preferred IPs by region"
+          git push
