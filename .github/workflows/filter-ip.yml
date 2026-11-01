@@ -1,0 +1,107 @@
+name: Filter Preferred IPs by Region
+
+on:
+  push:
+    paths:
+      - 'raw/results.csv'
+  workflow_dispatch:
+
+jobs:
+  filter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Filter by region
+        run: |
+          python3 << 'EOF'
+          import csv
+          import os
+          from collections import defaultdict
+
+          # 地区关键词（含简称 + 机房码 + 中英文）
+          REGION_MAP = {
+              "HK": ["HK", "HKG", "Hong Kong", "香港"],
+              "TW": ["TW", "TPE", "Taipei", "Taiwan", "台湾"],
+              "JP": ["JP", "NRT", "KIX", "HND", "Tokyo", "Osaka", "Japan", "日本"],
+              "US": ["US", "LAX", "SJC", "SEA", "IAD", "DFW", "ORD", "ATL", "EWR", "United States", "美国"],
+              "KR": ["KR", "ICN", "Seoul", "Korea", "韩国"],
+              "SG": ["SG", "SIN", "Singapore", "新加坡"],
+              "DE": ["DE", "FRA", "Germany", "德国"],
+          }
+
+          PER_REGION = 10
+          INPUT = "raw/results.csv"
+          OUTPUT = "api/preferred.txt"
+
+          def match_region(row):
+              text = " ".join(str(v) for v in row.values()).upper()
+              for code, keys in REGION_MAP.items():
+                  for k in keys:
+                      if k.upper() in text:
+                          return code
+              return None
+
+          def latency_key(r):
+              for key in ("平均延迟", "延迟", "latency", "avg_latency", "Latency", "AvgLatency"):
+                  if key in r and r[key] not in (None, ""):
+                      try:
+                          return float(str(r[key]).replace("ms", "").strip())
+                      except:
+                          pass
+              return 99999
+
+          def extract_ip_port(r):
+              # 优先找已经带端口的完整地址
+              for key in ("IP 地址", "IP地址", "IP", "ip", "地址", "Endpoint", "endpoint"):
+                  if key in r and r[key]:
+                      val = str(r[key]).strip()
+                      if val:
+                          return val
+              return None
+
+          buckets = defaultdict(list)
+
+          with open(INPUT, newline="", encoding="utf-8-sig") as f:
+              reader = csv.DictReader(f)
+              rows = list(reader)
+
+          rows.sort(key=latency_key)
+
+          for r in rows:
+              region = match_region(r)
+              if not region:
+                  continue
+              if len(buckets[region]) >= PER_REGION:
+                  continue
+
+              ip_port = extract_ip_port(r)
+              if not ip_port:
+                  continue
+
+              # 已包含端口，直接使用，不做端口修改
+              line = f"{ip_port}#{region}"
+              buckets[region].append(line)
+
+          lines = []
+          order = ["HK", "TW", "JP", "US", "KR", "SG", "DE"]
+          for code in order:
+              lines.extend(buckets.get(code, []))
+
+          os.makedirs("api", exist_ok=True)
+          with open(OUTPUT, "w", encoding="utf-8") as f:
+              f.write("\n".join(lines) + ("\n" if lines else ""))
+
+          print("Generated counts:")
+          for code in order:
+              print(f"{code}: {len(buckets.get(code, []))}")
+          print(f"Total: {len(lines)}")
+          EOF
+
+      - name: Commit filtered result
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add api/preferred.txt
+          git diff --staged --quiet || git commit -m "auto: filter preferred IPs by region"
+          git push
