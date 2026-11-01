@@ -1,54 +1,23 @@
-name: Filter Preferred IPs by Region
-
-on:
-  push:
-    paths:
-      - 'raw/results.csv'
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  filter:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Filter by region
+- name: Filter by region
         run: |
           python3 << 'EOF'
           import csv
           import os
+          import re
           from collections import defaultdict
 
-          # 源IP位置 里出现的简称 → 输出标签
           REGION_MAP = {
-              "HK": "HK",
-              "TW": "TW",
-              "JP": "JP",
-              "US": "US",
-              "KR": "KR",
-              "SG": "SG",
-              "DE": "DE",
-              # 兼容可能出现的机房码
-              "HKG": "HK",
-              "TPE": "TW",
-              "NRT": "JP",
-              "KIX": "JP",
-              "HND": "JP",
-              "ICN": "KR",
-              "SIN": "SG",
-              "FRA": "DE",
-              "LAX": "US",
-              "SJC": "US",
-              "SEA": "US",
-              "IAD": "US",
+              "HK": "HK", "TW": "TW", "JP": "JP", "US": "US",
+              "KR": "KR", "SG": "SG", "DE": "DE",
+              "HKG": "HK", "TPE": "TW", "NRT": "JP", "KIX": "JP", "HND": "JP",
+              "ICN": "KR", "SIN": "SG", "FRA": "DE",
+              "LAX": "US", "SJC": "US", "SEA": "US", "IAD": "US",
           }
 
           PER_REGION = 10
           INPUT = "raw/results.csv"
           OUTPUT = "api/preferred.txt"
+          EXPECTED_HEADERS = ["IP:PORT", "源IP位置", "网络延迟"]
 
           os.makedirs("api", exist_ok=True)
 
@@ -57,6 +26,11 @@ jobs:
               with open(OUTPUT, "w", encoding="utf-8") as f:
                   f.write("")
               raise SystemExit(1)
+
+          def is_ip_port(s: str) -> bool:
+              s = s.strip()
+              # 简单判断：形如 1.2.3.4:443 或带端口的地址
+              return bool(re.match(r"^\d{1,3}(?:\.\d{1,3}){3}:\d+$", s))
 
           def latency_key(r):
               val = str(r.get("网络延迟", "")).replace("ms", "").strip()
@@ -69,16 +43,43 @@ jobs:
               loc = str(r.get("源IP位置", "")).strip().upper()
               return REGION_MAP.get(loc)
 
-          buckets = defaultdict(list)
-
+          # 先读原始行，判断有没有表头
           with open(INPUT, newline="", encoding="utf-8-sig") as f:
-              reader = csv.DictReader(f)
-              rows = list(reader)
+              sample = f.read()
+
+          # 统一换行后按行处理
+          lines = [ln for ln in sample.splitlines() if ln.strip()]
+          if not lines:
+              print("CSV is empty")
+              with open(OUTPUT, "w", encoding="utf-8") as f:
+                  f.write("")
+              raise SystemExit(0)
+
+          first_row = next(csv.reader([lines[0]]))
+          has_header = True
+          if first_row and is_ip_port(first_row[0]):
+              has_header = False
+              print("No header detected, using default headers:", EXPECTED_HEADERS)
+          else:
+              print("Header detected:", first_row)
+
+          # 用 DictReader 读取；无表头时手动指定 fieldnames
+          from io import StringIO
+          if has_header:
+              reader = csv.DictReader(StringIO(sample))
+          else:
+              reader = csv.DictReader(StringIO(sample), fieldnames=EXPECTED_HEADERS)
+
+          rows = list(reader)
+          # 无表头时第一行就是数据，不用再跳过
+          # 有表头时 DictReader 已自动跳过表头
 
           print(f"CSV rows: {len(rows)}")
           if rows:
-              print(f"CSV headers: {list(rows[0].keys())}")
+              print(f"CSV headers used: {list(rows[0].keys())}")
+              print(f"Sample row: {rows[0]}")
 
+          buckets = defaultdict(list)
           rows.sort(key=latency_key)
 
           for r in rows:
@@ -89,31 +90,22 @@ jobs:
                   continue
 
               ip_port = str(r.get("IP:PORT", "")).strip()
-              if not ip_port:
+              if not ip_port or not is_ip_port(ip_port):
                   continue
 
-              # 已包含端口，直接使用
               line = f"{ip_port}#{region}"
               buckets[region].append(line)
 
-          lines = []
+          lines_out = []
           order = ["HK", "TW", "JP", "US", "KR", "SG", "DE"]
           for code in order:
-              lines.extend(buckets.get(code, []))
+              lines_out.extend(buckets.get(code, []))
 
           with open(OUTPUT, "w", encoding="utf-8") as f:
-              f.write("\n".join(lines) + ("\n" if lines else ""))
+              f.write("\n".join(lines_out) + ("\n" if lines_out else ""))
 
           print("Generated counts:")
           for code in order:
               print(f"{code}: {len(buckets.get(code, []))}")
-          print(f"Total: {len(lines)}")
+          print(f"Total: {len(lines_out)}")
           EOF
-
-      - name: Commit filtered result
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add api/preferred.txt
-          git diff --staged --quiet || git commit -m "auto: filter preferred IPs by region"
-          git push
