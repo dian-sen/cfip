@@ -126,13 +126,13 @@ jobs:
               sample = "\n".join(raw_lines)
               first_fields = next(csv.reader([raw_lines[0]]))
 
-              first_is_ip = first_fields and IP_ONLY_RE.match(first_fields[0].strip())
-              first_is_line = first_fields and LINE_RE.match(first_fields[0].strip())
+              first_is_ip = bool(first_fields and IP_ONLY_RE.match(first_fields[0].strip()))
+              first_is_line = bool(first_fields and LINE_RE.match(first_fields[0].strip()))
               header_token = any(
-                  any(t in raw_lines[0].lower() for t in (
+                  t in raw_lines[0].lower() for t in (
                       "ip:port", "ip", "port", "源ip", "位置", "地区", "region",
                       "延迟", "latency", "colo", "地址"
-                  ))
+                  )
               )
               has_header = (not first_is_ip and not first_is_line) and header_token
               print("Has header:", has_header, "| first row:", first_fields)
