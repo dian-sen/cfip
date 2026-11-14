@@ -13,7 +13,7 @@ CFData 测速 → 上传 raw/results.csv          → GitHub Actions 筛选 → 
 
 ### 移动（默认，保持兼容）
 
-将 CFData 导出的结果上传/覆盖到 **`raw/results.csv`**（文件名中的 results 没有空格）。
+将 CFData 导出的结果上传/覆盖到 **`raw/results.csv`**。
 
 上传后工作流自动更新：
 
