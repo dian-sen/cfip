@@ -2,23 +2,38 @@
 
 CFData 测速结果的离线筛选与订阅发布工具。**不测速、不探测地址，不改变 CFData → GitHub → EDT 的使用方式。**
 
+支持**移动**与**联通**两套独立优选结果，方便不同运营商网络环境分别使用。
+
 ```text
-CFData 测速 → 上传 raw/results.csv → GitHub Actions 推断列、校验与筛选
-                                         ↓
-                                api/preferred.txt → EDT 订阅
+CFData 测速 → 上传 raw/results.csv          → GitHub Actions 筛选 → api/preferred.txt          (移动)
+              上传 raw/results_unicom.csv   → GitHub Actions 筛选 → api/preferred_unicom.txt   (联通)
 ```
 
 ## 使用
 
-将 CFData 导出的结果上传/覆盖到 **`raw/results.csv`**（文件名中的 results 没有空格）。允许有表头或无表头、列顺序变化；支持逗号、分号和 Tab 分隔、UTF-8 BOM、CRLF 与 CSV 引号。
+### 移动（默认，保持兼容）
 
-上传后工作流自动更新原订阅路径，不需要改变 EDT 的订阅配置：
+将 CFData 导出的结果上传/覆盖到 **`raw/results.csv`**（文件名中的 results 没有空格）。
+
+上传后工作流自动更新：
 
 ```text
 https://raw.githubusercontent.com/dian-sen/cfip/refs/heads/main/api%2Fpreferred.txt
 ```
 
-输出格式保持：
+### 联通
+
+将联通网络下的 CFData 导出结果上传/覆盖到 **`raw/results_unicom.csv`**。
+
+上传后工作流自动更新：
+
+```text
+https://raw.githubusercontent.com/dian-sen/cfip/refs/heads/main/api%2Fpreferred_unicom.txt
+```
+
+EDT 中可分别添加两条订阅，按当前网络环境选择使用。
+
+### 输出格式
 
 ```text
 38.47.220.144:443#HK-67ms
@@ -72,7 +87,7 @@ IP:PORT,源IP位置,网络延迟
 - `region_column`：需要使用的地区列。
 - `latency_column`：实际延迟列。
 
-填 **从 1 开始的列号**或精确表头名，其余留空继续自动识别。例如 `IP,端口,地区,延迟,速度` 全为无表头裸数字，可指定端口列 `2`、延迟列 `4`。这些覆盖只用于这一次手动运行；下一次上传重新自动识别。
+填 **从 1 开始的列号**或精确表头名，其余留空继续自动识别。例如 `IP,端口,地区,延迟,速度` 全为无表头裸数字，可指定端口列 `2`、延迟列 `4`。这些覆盖只用于这一次手动运行；下一次上传重新自动识别。手动运行时参数会同时应用于移动和联通两套结果。
 
 `raw/results.txt` 当前不是工作流输入。如果该文件仅包含 `IP:端口#HKG-HK`、没有延迟，就无法据此选出最低延迟，不会拿它替代 CSV。
 
@@ -93,7 +108,12 @@ IP:PORT,源IP位置,网络延迟
 
 ```sh
 python3 -m unittest discover -s tests -v
-python3 scripts/filter_ips.py --output /tmp/preferred-preview.txt
+
+# 移动
+python3 scripts/filter_ips.py --input raw/results.csv --output /tmp/preferred-preview.txt
+
+# 联通
+python3 scripts/filter_ips.py --input raw/results_unicom.csv --output /tmp/preferred-unicom-preview.txt
 ```
 
 列覆盖示例：
@@ -102,4 +122,4 @@ python3 scripts/filter_ips.py --output /tmp/preferred-preview.txt
 python3 scripts/filter_ips.py --latency-column 3
 ```
 
-筛选脚本、测试、`filter-ip.yml` 或 `raw/results.csv` 更新后触发 main 发布流程；仅更新 README 或 `test.yml` 不触发发布。Pull Request 会执行只读测试和预览，不发布文件。
+筛选脚本、测试、`filter-ip.yml`、`raw/results.csv` 或 `raw/results_unicom.csv` 更新后触发 main 发布流程；仅更新 README 或 `test.yml` 不触发发布。Pull Request 会执行只读测试和预览，不发布文件。
