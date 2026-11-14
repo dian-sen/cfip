@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - raw/results.csv
+      - raw/results_unicom.csv
       - scripts/filter_ips.py
       - tests/**
       - .github/workflows/filter-ip.yml
@@ -42,7 +43,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Resolve the current branch tip, not an old queued upload's commit.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.ref_name }}
@@ -53,7 +53,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s tests -v
 
-      - name: Infer columns and generate subscription
+      - name: Infer columns and generate subscriptions (Mobile + Unicom)
         env:
           ENDPOINT_COLUMN: ${{ inputs.endpoint_column }}
           PORT_COLUMN: ${{ inputs.port_column }}
@@ -62,35 +62,71 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           args=()
           [[ -z "$ENDPOINT_COLUMN" ]] || args+=(--endpoint-column "$ENDPOINT_COLUMN")
           [[ -z "$PORT_COLUMN" ]] || args+=(--port-column "$PORT_COLUMN")
           [[ -z "$REGION_COLUMN" ]] || args+=(--region-column "$REGION_COLUMN")
           [[ -z "$LATENCY_COLUMN" ]] || args+=(--latency-column "$LATENCY_COLUMN")
-          status=0
-          python3 scripts/filter_ips.py "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/filter-report.txt" || status=$?
-          {
-            echo '### Preferred IP filtering'
-            echo "Exit status: $status"
-            echo '```text'
-            cat "$RUNNER_TEMP/filter-report.txt"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit "$status"
 
-      - name: Commit changed subscription
+          overall_status=0
+
+          # ---------- Mobile（现有路径，保持兼容） ----------
+          echo "### Mobile (results.csv → preferred.txt)" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f raw/results.csv ]]; then
+            status=0
+            python3 scripts/filter_ips.py \
+              --input raw/results.csv \
+              --output api/preferred.txt \
+              "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/filter-mobile.txt" || status=$?
+            {
+              echo "Exit status: $status"
+              echo '```text'
+              cat "$RUNNER_TEMP/filter-mobile.txt"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [[ $status -ne 0 ]]; then
+              overall_status=$status
+            fi
+          else
+            echo "raw/results.csv not found, skip Mobile." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ---------- Unicom / 联通 ----------
+          echo "### Unicom (results_unicom.csv → preferred_unicom.txt)" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f raw/results_unicom.csv ]]; then
+            status=0
+            python3 scripts/filter_ips.py \
+              --input raw/results_unicom.csv \
+              --output api/preferred_unicom.txt \
+              "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/filter-unicom.txt" || status=$?
+            {
+              echo "Exit status: $status"
+              echo '```text'
+              cat "$RUNNER_TEMP/filter-unicom.txt"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [[ $status -ne 0 ]]; then
+              overall_status=$status
+            fi
+          else
+            echo "raw/results_unicom.csv not found, skip Unicom." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          exit "$overall_status"
+
+      - name: Commit changed subscriptions
         shell: bash
         run: |
           set -euo pipefail
-          git add -- api/preferred.txt
+          git add -- api/preferred.txt api/preferred_unicom.txt 2>/dev/null || true
           if git diff --cached --quiet; then
-            echo 'Subscription unchanged; no commit needed.'
+            echo 'Subscriptions unchanged; no commit needed.'
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'auto: filter preferred IPs by region'
-          # Never force-push/rebase a generated result over a newer upload.
-          # If main moved during processing, fail safely; its upload run will
-          # check out the latest input and regenerate the subscription.
+          git commit -m 'auto: filter preferred IPs by region (Mobile + Unicom)'
           git push origin HEAD:main
