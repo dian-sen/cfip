@@ -123,3 +123,31 @@ python3 scripts/filter_ips.py --latency-column 3
 ```
 
 筛选脚本、测试、`filter-ip.yml`、`raw/results.csv` 或 `raw/results_unicom.csv` 更新后触发 main 发布流程；仅更新 README 或 `test.yml` 不触发发布。Pull Request 会执行只读测试和预览，不发布文件。
+
+## Unicom 定额低延迟订阅
+
+新增独立工作流 **Generate Unicom Top 60**，读取联通数据源 **`raw/results_unicom.csv`**，发布到 **`api/Unicom.txt`**（注意文件名大小写）：
+
+```text
+https://raw.githubusercontent.com/dian-sen/cfip/refs/heads/main/api/Unicom.txt
+```
+
+选择规则：
+
+- 日本 JP：延迟最低的 20 个端点。
+- 新加坡 SG：延迟最低的 10 个端点。
+- 美国 US：延迟最低的 20 个端点。
+- 其他地区（排除 JP、SG、US）：所有其他地区合并排序，取延迟最低的 10 个端点，并非每个地区各取 10 个。
+
+先按各组名额选择，再将入选端点统一按延迟升序输出。最多 60 条；某组不足时仅输出实际可用数量，不借用其他组补齐。格式仍为 `IP:端口#地区-延迟ms`，不会改动原有 `preferred.txt` 和 `preferred_unicom.txt` 的筛选规则。
+
+该订阅额外支持 ISO 两字母国家/地区代码（例如 NL、CA、GB），以及常用中英文别名和明确映射的 colo；未知标签跳过。沿用无表头/列乱序推断、严格地址与延迟校验、去重、地区冲突隔离和失败保留旧文件，无测速请求。
+
+上传或覆盖 `raw/results_unicom.csv` 后自动运行；脚本、测试或新工作流更新也会触发。可在该工作流的 Run workflow 中手动指定列号或表头名，参数只用于该次运行。新工作流与旧发布流程共用分支发布锁，避免同时推送。
+
+本地预览：
+
+```sh
+python3 scripts/filter_unicom.py --output /tmp/Unicom-preview.txt
+python3 -m unittest discover -s tests -v
+```

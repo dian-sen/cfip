@@ -6,6 +6,7 @@ on:
       - scripts/**
       - tests/**
       - raw/results.csv
+      - raw/results_unicom.csv
       - .github/workflows/**
 
 permissions:
@@ -25,3 +26,5 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: Check the uploaded data without publishing
         run: python3 scripts/filter_ips.py --output "$RUNNER_TEMP/preferred.txt"
+      - name: Preview Unicom quota subscription without publishing
+        run: python3 scripts/filter_unicom.py --output "$RUNNER_TEMP/Unicom.txt"

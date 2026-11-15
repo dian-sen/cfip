@@ -59,7 +59,11 @@ def normalize(value: str) -> str:
 COUNTRIES = {normalize(alias): region for region, aliases in ALIASES.items() for alias in aliases}
 
 
-def parse_region(value: str, *, allow_colo: bool = True) -> str | None:
+def parse_region(value: str, *, allow_colo: bool = True,
+                 countries: dict[str, str] | None = None,
+                 colos: dict[str, str] | None = None) -> str | None:
+    countries = COUNTRIES if countries is None else countries
+    colos = COLOS if colos is None else colos
     value = value.strip()
     # Strip a complete, validated latency suffix before tokenizing country/colo
     # labels. This preserves exponent signs and never discards a negative sign.
@@ -68,23 +72,23 @@ def parse_region(value: str, *, allow_colo: bool = True) -> str | None:
         if parse_latency(timed_label[2], allow_bare=False) is None:
             return None
         value = timed_label[1]
-    country = COUNTRIES.get(normalize(value))
+    country = countries.get(normalize(value))
     if country:
         return country
     # Annotated endpoints commonly use #HKG-HK or #HK-12ms.
     tokens = [token for token in re.split(r"[-/#|]+", value.upper()) if token]
     # Do not recognize arbitrary prose merely because it contains a country.
-    if any(normalize(token) not in COUNTRIES and normalize(token) not in COLOS
+    if any(normalize(token) not in countries and normalize(token) not in colos
            and parse_latency(token, allow_bare=False) is None for token in tokens):
         return None
     tokens = [normalize(token) for token in tokens]
-    countries = {COUNTRIES[normalize(t)] for t in tokens if normalize(t) in COUNTRIES}
-    if len(countries) == 1:
-        return next(iter(countries))
-    if len(countries) > 1:
+    country_regions = {countries[t] for t in tokens if t in countries}
+    if len(country_regions) == 1:
+        return next(iter(country_regions))
+    if len(country_regions) > 1:
         return None
     if allow_colo:
-        regions = {COLOS[t] for t in tokens if t in COLOS}
+        regions = {colos[t] for t in tokens if t in colos}
         if len(regions) == 1:
             return next(iter(regions))
     return None
@@ -241,7 +245,13 @@ class Mapping:
         return result
 
 
-def infer_mapping(header: list[str] | None, rows: list[list[str]], overrides: dict | None = None) -> Mapping:
+def infer_mapping(header: list[str] | None, rows: list[list[str]], overrides: dict | None = None,
+                  region_parser=None) -> Mapping:
+    """Infer columns, optionally using a workflow-specific region parser.
+
+    The default remains parse_region so existing preferred filtering is unchanged.
+    """
+    region_parser = region_parser or parse_region
     overrides = overrides or {}
     width = max([len(header or [])] + [len(row) for row in rows])
     if not width or not rows:
@@ -318,14 +328,14 @@ def infer_mapping(header: list[str] | None, rows: list[list[str]], overrides: di
     if port is not None:
         used.add(port)
     annotations = [value.partition("#")[2] for value in columns[endpoint] if "#" in value]
-    embedded_country = any(parse_region(value, allow_colo=False) for value in annotations)
-    embedded_latency = any(annotation_latency(value) is not None for value in annotations)
+    embedded_country = any(region_parser(value, allow_colo=False) for value in annotations)
+    embedded_latency = any(annotation_latency(value, region_parser=region_parser) is not None for value in annotations)
     region = named("region", ("source_region", "region", "colo"))
     region_kind = (kinds.get(region) or "inferred_country") if region is not None else "embedded"
     if region is None:
         available = [i for i in columns if i not in used and not kinds.get(i)]
-        direct = content_candidates(available, lambda x: parse_region(x, allow_colo=False))
-        indirect = content_candidates(available, parse_region)
+        direct = content_candidates(available, lambda x: region_parser(x, allow_colo=False))
+        indirect = content_candidates(available, region_parser)
         region = unique(direct or ([] if embedded_country else indirect), "region")
         if region is not None:
             region_kind = "inferred_country" if direct else "inferred_colo"
@@ -387,11 +397,12 @@ class Result:
         return f"{self.endpoint}#{self.region}-{format_latency(self.latency)}ms"
 
 
-def annotation_latency(annotation: str) -> Decimal | None:
+def annotation_latency(annotation: str, *, region_parser=None) -> Decimal | None:
+    region_parser = region_parser or parse_region
     # Anchor the entire label: never restart a suffix search after a minus sign.
     match = re.fullmatch(rf"(.+?)-\s*({NUMBER}\s*(?:ms|us|µs|μs|s|毫秒|微秒|秒))", annotation.strip(), re.I)
     return (parse_latency(match[2], allow_bare=False)
-            if match and parse_region(match[1]) is not None else None)
+            if match and region_parser(match[1]) is not None else None)
 
 
 def filter_text(text: str, per_region: int = 10, overrides: dict | None = None) -> tuple[list[Result], dict]:
