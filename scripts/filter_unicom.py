@@ -13,8 +13,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import filter_ips as base  # noqa: E402
 
-TARGETS = {"JP": 20, "SG": 10, "US": 20}
-OTHER_LIMIT = 10
+# Per-country caps; shortfalls never spill into another country.
+TARGETS = {"JP": 20, "US": 30, "SG": 10}
+OTHER_LIMIT = 0
 
 # ISO 3166-1 alpha-2 assigned country/territory codes. Unknown labels must
 # never become an "other" result merely because they contain two letters.

@@ -71,7 +71,7 @@ jobs:
           status=0
           python3 scripts/filter_unicom.py "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/unicom-report.txt" || status=$?
           {
-            echo '### Unicom: JP 20 / SG 10 / US 20 / Other 10'
+            echo '### Unicom: JP 20 / US 30 / SG 10'
             echo "Exit status: $status"
             echo '```text'
             cat "$RUNNER_TEMP/unicom-report.txt"

@@ -65,40 +65,13 @@ class RegionTests(unittest.TestCase):
                 self.assertIsNone(b.annotation_latency(value, region_parser=u.other_region))
 
 
-class FilterTests(unittest.TestCase):
-    def test_real_unicom_source_quotas_and_minima(self):
-        text = (ROOT / "raw/results_unicom.csv").read_text(encoding="utf-8-sig")
-        results, stats = u.filter_unicom(text)
-        self.assertEqual(stats["mapping"]["region"]["name"], "源IP位置")
-        original = list(csv.DictReader(io.StringIO(text)))
-        # Independent selection oracle from the real, explicitly named columns.
-        best, conflicts = {}, set()
-        for row in original:
-            endpoint, _ = b.parse_endpoint(row["IP:PORT"])
-            region, latency = u.other_region(row["源IP位置"]), b.parse_latency(row["网络延迟"])
-            if region is None or latency is None:
-                continue
-            if endpoint in best and best[endpoint].region != region:
-                conflicts.add(endpoint)
-            if endpoint not in best or latency < best[endpoint].latency:
-                best[endpoint] = b.Result(endpoint, region, latency)
-        usable = [r for ep, r in best.items() if ep not in conflicts]
-        expected = []
-        for region, limit in u.TARGETS.items():
-            group = sorted((r for r in usable if r.region == region), key=lambda r: (r.latency, r.endpoint))
-            expected.extend(group[:limit])
-            self.assertEqual(sum(r.region == region for r in results), min(limit, len(group)))
-        other = sorted((r for r in usable if r.region not in u.TARGETS), key=lambda r: (r.latency, r.endpoint))[:10]
-        expected.extend(other)
-        expected.sort(key=lambda r: (r.latency, r.endpoint))
-        self.assertEqual(results, expected)
-        # Current source has 32 JP, 670 US, 13 NL, 10 CA and only 1 SG.
-        self.assertEqual(stats["targets"], {"JP": 20, "SG": 1, "US": 20})
-        self.assertEqual(stats["other"], 10)
-        self.assertEqual(len(results), 51)
-        rows = [[row[name] for name in original[0]] for row in original]
-        random.Random(9).shuffle(rows)
-        self.assertEqual(lines(u.filter_unicom(render(rows, list(original[0])))[0]), lines(results))
+class ParsingTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise the extended country parser independently of production's
+        # JP/US/SG-only publication policy. QuotaTests uses the real policy.
+        other_limit = patch.object(u, "OTHER_LIMIT", 10)
+        other_limit.start()
+        self.addCleanup(other_limit.stop)
 
     def test_headerless_pure_other_countries_all_column_orders(self):
         rows = [["31ms", "GB", "8.8.8.8:443"], [".02s", "NL", "1.1.1.1:8443"],
@@ -188,34 +161,6 @@ class FilterTests(unittest.TestCase):
             self.assertEqual(stats["region_conflict_endpoints"], 1)
             self.assertEqual(stats["dropped"]["duplicate_endpoint"], 2)
 
-    def test_full_quotas_ties_and_global_order(self):
-        rows = []
-        for subnet, region, count in ((1, "JP", 25), (2, "SG", 15), (3, "US", 25),
-                                      (4, "GB", 15), (5, "NL", 15)):
-            rows.extend([[f"8.8.{subnet}.{i}:443", region, "1ms"] for i in range(1, count + 1)])
-        expected = []
-        for group, limit in (("JP", 20), ("SG", 10), ("US", 20), ("other", 10)):
-            candidates = [row for row in rows if (row[1] == group if group != "other" else row[1] not in u.TARGETS)]
-            expected.extend(sorted(candidates, key=lambda row: row[0])[:limit])
-        expected.sort(key=lambda row: row[0])
-        for seed in range(3):
-            random.Random(seed).shuffle(rows)
-            results, stats = u.filter_unicom(render(rows, ["endpoint", "region", "latency"]))
-            self.assertEqual([r.endpoint for r in results], [row[0] for row in expected])
-            self.assertEqual(stats["targets"], {"JP": 20, "SG": 10, "US": 20})
-            self.assertEqual(stats["other"], 10)
-            self.assertEqual(len(results), 60)
-
-    def test_no_quota_transfer_and_other_pool_is_combined(self):
-        rows = [["1.1.1.1:443", "SG", "999ms"]]
-        for index in range(1, 36):
-            rows.append([f"8.8.8.{index}:443", ("GB", "NL", "AU")[index % 3], f"{index}ms"])
-        results, stats = u.filter_unicom(render(rows, ["endpoint", "region", "latency"]))
-        self.assertEqual(len(results), 11)
-        self.assertEqual(stats["targets"], {"SG": 1})
-        self.assertEqual(stats["other"], 10)
-        self.assertEqual([r.latency for r in results],[Decimal(i) for i in range (1, 11)] +[Decimal(999)])
-
     def test_separate_ports_units_ipv6_and_round_trip(self):
         text = "源IP位置,端口,延迟(s),IP\n英国,443,.012,8.8.8.8\n澳洲,8443,5MS,2606:4700:4700::1111\n"
         results, _ = u.filter_unicom(text)
@@ -224,6 +169,74 @@ class FilterTests(unittest.TestCase):
         for text in ("8.8.8.8,GB,12ms\n", "8.8.8.8:443,GB,443\n"):
             with self.subTest(text=text), self.assertRaises(b.FilterError):
                 u.filter_unicom(text)
+
+
+class QuotaTests(unittest.TestCase):
+    def test_fixed_quotas_minima_ties_and_global_order(self):
+        rows = []
+        for subnet, region, count in ((1, "JP", 25), (2, "US", 35),
+                                      (3, "SG", 15), (4, "GB", 10)):
+            rows.extend([[f"8.8.{subnet}.{index}:443", region,
+                          f"{index % 7 if region != 'GB' else 0}ms"]
+                         for index in range(1, count + 1)])
+        expected_counts = {"JP": 20, "US": 30, "SG": 10}
+        order = lambda row: (Decimal(row[2][:-2]), row[0])
+        expected = []
+        for region, limit in expected_counts.items():
+            expected.extend(sorted((row for row in rows if row[1] == region),
+                                   key=order)[:limit])
+        expected.sort(key=order)
+        for seed in range(3):
+            shuffled = list(rows)
+            random.Random(seed).shuffle(shuffled)
+            results, stats = u.filter_unicom(render(shuffled,
+                                                     ["endpoint", "region", "latency"]))
+            self.assertEqual([r.endpoint for r in results], [row[0] for row in expected])
+            self.assertEqual(Counter(r.region for r in results), Counter(expected_counts))
+            self.assertEqual(stats["targets"], expected_counts)
+            self.assertEqual(stats["other"], 0)
+            self.assertEqual(stats["other_regions"], {})
+            self.assertEqual(len(results), 60)
+
+    def test_shortfalls_do_not_transfer_or_include_other_regions(self):
+        for jp, us, sg in ((25, 35, 1), (2, 35, 15), (25, 3, 15), (25, 35, 0)):
+            with self.subTest(jp=jp, us=us, sg=sg):
+                rows = [["8.8.13.1:443", "GB", "0ms"]]
+                for subnet, region, count in ((1, "JP", jp), (2, "US", us), (3, "SG", sg)):
+                    rows.extend([[f"8.8.{subnet}.{i}:443", region, f"{i}ms"]
+                                 for i in range(1, count + 1)])
+                results, stats = u.filter_unicom(render(rows, ["endpoint", "region", "latency"]))
+                expected = {region: count for region, count in
+                            (("JP", min(jp, 20)), ("US", min(us, 30)), ("SG", min(sg, 10)))
+                            if count}
+                self.assertEqual(stats["targets"], expected)
+                self.assertEqual(Counter(r.region for r in results), Counter(expected))
+                self.assertEqual(stats["other"], 0)
+                self.assertEqual(len(results), sum(expected.values()))
+
+    def test_real_shaped_columns_use_source_region_and_new_policy(self):
+        rows = [[f"8.8.20.{index}:443", "US", f"{index}ms"]
+                for index in range(1, 32)]
+        rows += [[f"8.8.21.{index}:443", "JP", f"{index}ms"]
+                 for index in range(1, 22)]
+        rows += [[f"8.8.22.{index}:443", "SG", f"{index}ms"]
+                 for index in range(1, 12)]
+        rows.append(["8.8.23.1:443", "DE", "0ms"])
+        # Fixed CFData-shaped fixture: source country beats the conflicting
+        # colo/generic region and named latency beats other numeric columns.
+        header = ["IP:PORT", "TLS", "丢包率", "网络延迟", "下载速度", "出站IP",
+                  "IP类型", "原始输入", "数据中心", "源IP位置", "地区", "城市",
+                  "ASN号码", "ASN组织"]
+        original = [[endpoint, "true", "0%", latency, "100MB/s", "1.1.1.1", "IPv4",
+                     endpoint.split(":")[0], "FRA", region, "Europe", "Frankfurt",
+                     "AS13335", "Example, Inc."] for endpoint, region, latency in rows]
+        text = render(original, header)
+        results, stats = u.filter_unicom(text)
+        self.assertEqual(stats["mapping"]["region"]["name"], "源IP位置")
+        self.assertEqual(stats["mapping"]["latency"]["name"], "网络延迟")
+        self.assertEqual(stats["targets"], {"JP": 20, "US": 30, "SG": 10})
+        self.assertEqual(stats["other"], 0)
+        self.assertEqual(len(results), 60)
 
 
 class CLITests(unittest.TestCase):
@@ -237,7 +250,7 @@ class CLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "raw").mkdir()
-            (root / "raw/results_unicom.csv").write_text("8.8.8.8:443#GB-12ms\n")
+            (root / "raw/results_unicom.csv").write_text("8.8.8.8:443#JP-12ms\n1.1.1.1:443#GB-1ms\n")
             old_cwd = Path.cwd()
             try:
                 os.chdir(root)
@@ -245,11 +258,13 @@ class CLITests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
             self.assertEqual((status, err), (0, ""))
-            self.assertEqual(json.loads(out)["other"], 1)
-            self.assertEqual((root / "api/Unicom.txt").read_text(), "8.8.8.8:443#GB-12ms\n")
+            self.assertEqual(json.loads(out)["targets"], {"JP": 1})
+            self.assertEqual(json.loads(out)["other"], 0)
+            self.assertEqual((root / "api/Unicom.txt").read_text(), "8.8.8.8:443#JP-12ms\n")
 
     def test_failures_preserve_output_and_report_exception(self):
         for data, message in ((b"", "empty input"), (b"endpoint,region,latency\n8.8.8.8:443,HUH,1ms\n", "no publishable"),
+                              (b"8.8.8.8:443#GB-1ms\n", "no publishable"),
                               (b"8.8.8.8:443,GB,10,100\n", "ambiguous latency"), (b"\xff", "decode")):
             with self.subTest(data=data), tempfile.TemporaryDirectory() as directory:
                 source, output = Path(directory) / "input", Path(directory) / "output"
@@ -268,7 +283,7 @@ class CLITests(unittest.TestCase):
     def test_reject_same_file_including_links(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input"
-            source.write_text("8.8.8.8:443#GB-1ms\n")
+            source.write_text("8.8.8.8:443#JP-1ms\n")
             symlink, hardlink = source.with_name("symlink"), source.with_name("hardlink")
             symlink.symlink_to(source)
             os.link(source, hardlink)
@@ -277,12 +292,12 @@ class CLITests(unittest.TestCase):
                     status, _, err = self.run_main(["--input", str(source), "--output", str(target)])
                     self.assertEqual(status, 1)
                     self.assertIn("input and output must be different files", err)
-                    self.assertEqual(source.read_text(), "8.8.8.8:443#GB-1ms\n")
+                    self.assertEqual(source.read_text(), "8.8.8.8:443#JP-1ms\n")
 
     def test_atomic_failure_cleanup_preserves_output(self):
         with tempfile.TemporaryDirectory() as directory:
             source, output = Path(directory) / "input", Path(directory) / "output"
-            source.write_text("8.8.8.8:443#GB-1ms\n")
+            source.write_text("8.8.8.8:443#JP-1ms\n")
             output.write_text("original\n")
             with patch.object(b.os, "replace", side_effect=OSError("replace blocked")):
                 status, _, err = self.run_main(["--input", str(source), "--output", str(output)])
