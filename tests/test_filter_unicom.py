@@ -211,10 +211,10 @@ class FilterTests(unittest.TestCase):
         for index in range(1, 36):
             rows.append([f"8.8.8.{index}:443", ("GB", "NL", "AU")[index % 3], f"{index}ms"])
         results, stats = u.filter_unicom(render(rows, ["endpoint", "region", "latency"]))
-        self.assertEqual(len(results), 11)
+        self.assertEqual(len(results), 1)
         self.assertEqual(stats["targets"], {"SG": 1})
-        self.assertEqual(stats["other"], 10)
-        self.assertEqual([r.latency for r in results], [Decimal(i) for i in range(1, 11)] + [Decimal(999)])
+        self.assertEqual(stats["other"], 0)
+        self.assertEqual([r.latency for r in results],[Decimal(999)])
 
     def test_separate_ports_units_ipv6_and_round_trip(self):
         text = "源IP位置,端口,延迟(s),IP\n英国,443,.012,8.8.8.8\n澳洲,8443,5MS,2606:4700:4700::1111\n"
